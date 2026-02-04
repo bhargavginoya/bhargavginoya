@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, StyleSheet, ActivityIndicator, Image } from 'react-native';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -27,8 +27,12 @@ export default function Index() {
 
   return (
     <View style={styles.container}>
-      <ActivityIndicator size="large" color="#4F46E5" />
-      <Text style={styles.text}>Loading HRMS...</Text>
+      <Image
+        source={require('../assets/images/gyanmanjari-circle.png')}
+        style={styles.logo}
+        resizeMode="contain"
+      />
+      <ActivityIndicator size="large" color="#1E3A8A" style={styles.loader} />
     </View>
   );
 }
@@ -40,9 +44,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  text: {
+  logo: {
+    width: 150,
+    height: 150,
+    marginBottom: 24,
+  },
+  loader: {
     marginTop: 16,
-    fontSize: 16,
-    color: '#6B7280',
   },
 });
