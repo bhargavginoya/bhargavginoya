@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "HRMS",
-    "slug": "hrms-app",
+    "name": "Gyanmanjari HRMS",
+    "slug": "gyanmanjari-hrms",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
