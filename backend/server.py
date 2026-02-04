@@ -16,7 +16,114 @@ import base64
 import math
 
 # Import our custom modules
-from models import *
+try:
+    from models import *
+except ImportError:
+    # Fallback if models.py has issues - define essential models here
+    from pydantic import BaseModel, EmailStr
+    
+    class UserRole:
+        SUPER_ADMIN = "super_admin"
+        CENTER_ADMIN = "center_admin"
+        HR_MANAGER = "hr_manager"
+        REPORTING_MANAGER = "reporting_manager"
+        EMPLOYEE = "employee"
+    
+    class UserLogin(BaseModel):
+        email: EmailStr
+        password: str
+    
+    class UserRegister(BaseModel):
+        email: EmailStr
+        password: str
+        full_name: str
+        employee_id: str
+        role: str = UserRole.EMPLOYEE
+        department: Optional[str] = None
+        designation: Optional[str] = None
+    
+    class UserResponse(BaseModel):
+        id: str
+        email: str
+        full_name: str
+        employee_id: str
+        role: str
+        department: Optional[str] = None
+        designation: Optional[str] = None
+        is_active: bool
+        created_at: datetime
+        assigned_centers: List[str] = []
+        primary_center: Optional[str] = None
+        profile_locked: bool = False
+    
+    class TokenResponse(BaseModel):
+        access_token: str
+        token_type: str = "bearer"
+        user: UserResponse
+    
+    class CheckInRequest(BaseModel):
+        latitude: float
+        longitude: float
+        selfie_base64: str
+        geofence_id: str
+        center_id: str
+    
+    class CheckOutRequest(BaseModel):
+        latitude: float
+        longitude: float
+    
+    class LeaveRequest(BaseModel):
+        leave_type: str
+        start_date: str
+        end_date: str
+        reason: str
+        days_count: float
+        medical_certificate_base64: Optional[str] = None
+        center_id: Optional[str] = None
+    
+    class LeaveApproval(BaseModel):
+        leave_id: str
+        status: str
+        remarks: Optional[str] = None
+    
+    class LeaveOverride(BaseModel):
+        leave_id: str
+        new_leave_type: str
+        reason: str
+    
+    class CenterCreate(BaseModel):
+        name: str
+        address: str
+        contact: str
+        geofences: List[dict] = []
+        holidays: List[dict] = []
+    
+    class CenterResponse(BaseModel):
+        id: str
+        name: str
+        address: str
+        contact: str
+        center_admin_ids: List[str] = []
+        geofences: List[dict]
+        holidays: List[dict]
+        created_at: datetime
+        employee_count: int = 0
+    
+    class AssignCentersRequest(BaseModel):
+        employee_id: str
+        center_ids: List[str]
+        primary_center_id: str
+    
+    class PayrollGenerate(BaseModel):
+        month: str
+        employee_ids: Optional[List[str]] = None
+    
+    class CompensatoryCredit(BaseModel):
+        employee_id: str
+        days_credited: float
+        reason: str
+        year_valid_for: int
+
 from database import get_database, create_indexes, close_database
 from leave_engine import LeaveRuleEngine
 from payroll_engine import PayrollEngine
