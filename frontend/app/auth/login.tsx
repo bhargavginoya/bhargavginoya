@@ -10,6 +10,7 @@ import {
   ScrollView,
   Alert,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useAuth } from '../../context/AuthContext';
@@ -63,8 +64,12 @@ export default function LoginScreen() {
     >
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.header}>
-          <Ionicons name="business" size={64} color="#4F46E5" />
-          <Text style={styles.title}>HRMS Login</Text>
+          <Image
+            source={require('../../assets/images/gyanmanjari-circle.png')}
+            style={styles.logo}
+            resizeMode="contain"
+          />
+          <Text style={styles.title}>Gyanmanjari HRMS</Text>
           <Text style={styles.subtitle}>Welcome back! Please login to continue</Text>
         </View>
 
@@ -138,11 +143,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 48,
   },
+  logo: {
+    width: 120,
+    height: 120,
+    marginBottom: 16,
+  },
   title: {
-    fontSize: 32,
+    fontSize: 28,
     fontWeight: 'bold',
-    color: '#111827',
-    marginTop: 16,
+    color: '#1E3A8A',
+    marginTop: 8,
   },
   subtitle: {
     fontSize: 14,
@@ -173,7 +183,7 @@ const styles = StyleSheet.create({
     color: '#111827',
   },
   button: {
-    backgroundColor: '#4F46E5',
+    backgroundColor: '#1E3A8A',
     paddingVertical: 16,
     borderRadius: 12,
     alignItems: 'center',
@@ -194,7 +204,7 @@ const styles = StyleSheet.create({
     color: '#6B7280',
   },
   linkTextBold: {
-    color: '#4F46E5',
+    color: '#1E3A8A',
     fontWeight: '600',
   },
 });
