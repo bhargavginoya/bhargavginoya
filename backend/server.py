@@ -296,6 +296,8 @@ async def get_geofences(current_user: dict = Depends(get_current_user)):
     for gf in geofences:
         gf["id"] = str(gf["_id"])
         del gf["_id"]
+        if gf.get("created_at") is None:
+            gf["created_at"] = datetime.utcnow()
         result.append(GeoFenceResponse(**gf))
     return result
 
