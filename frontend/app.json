@@ -44,6 +44,18 @@
           "resizeMode": "contain",
           "backgroundColor": "#000"
         }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow HRMS to track your location during work hours for attendance tracking."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow HRMS to access camera for attendance selfie verification."
+        }
       ]
     ],
     "experiments": {
