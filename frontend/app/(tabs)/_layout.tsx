@@ -4,24 +4,25 @@ import { useAuth } from '../../context/AuthContext';
 
 export default function TabsLayout() {
   const { user } = useAuth();
-  const isAdmin = user?.role === 'super_admin' || user?.role === 'hr_manager';
+  const isAdmin = user?.role === 'super_admin' || user?.role === 'hr_manager' || user?.role === 'center_admin';
+  const isSuperAdmin = user?.role === 'super_admin';
 
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: '#4F46E5',
+        tabBarActiveTintColor: '#1E3A8A',
         tabBarInactiveTintColor: '#9CA3AF',
         tabBarStyle: {
           backgroundColor: '#FFFFFF',
           borderTopWidth: 1,
           borderTopColor: '#E5E7EB',
-          height: 60,
+          height: 64,
           paddingBottom: 8,
           paddingTop: 8,
         },
         tabBarLabelStyle: {
-          fontSize: 12,
+          fontSize: 11,
           fontWeight: '600',
         },
       }}
@@ -53,6 +54,26 @@ export default function TabsLayout() {
           ),
         }}
       />
+      <Tabs.Screen
+        name="payroll"
+        options={{
+          title: 'Payroll',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="cash" size={size} color={color} />
+          ),
+        }}
+      />
+      {isSuperAdmin && (
+        <Tabs.Screen
+          name="centers"
+          options={{
+            title: 'Centers',
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="business" size={size} color={color} />
+            ),
+          }}
+        />
+      )}
       {isAdmin && (
         <Tabs.Screen
           name="admin"
