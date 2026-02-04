@@ -15,15 +15,24 @@ export default function ProfileScreen() {
   const { user, logout } = useAuth();
   const router = useRouter();
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Logout',
         style: 'destructive',
         onPress: async () => {
-          await logout();
-          router.replace('/auth/login');
+          try {
+            await logout();
+            // Force navigation to login
+            setTimeout(() => {
+              router.replace('/auth/login');
+            }, 100);
+          } catch (error) {
+            console.error('Logout error:', error);
+            // Force logout even if error
+            router.replace('/auth/login');
+          }
         },
       },
     ]);
