@@ -1,16 +1,34 @@
-import { Text, View, StyleSheet, Image } from "react-native";
-
-const EXPO_PUBLIC_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { useRouter } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function Index() {
-  console.log(EXPO_PUBLIC_BACKEND_URL, "EXPO_PUBLIC_BACKEND_URL");
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    checkAuth();
+  }, []);
+
+  const checkAuth = async () => {
+    try {
+      const token = await AsyncStorage.getItem('authToken');
+      if (token) {
+        router.replace('/(tabs)/home');
+      } else {
+        router.replace('/auth/login');
+      }
+    } catch (error) {
+      console.error('Auth check error:', error);
+      router.replace('/auth/login');
+    }
+  };
 
   return (
     <View style={styles.container}>
-      <Image
-        source={require("../assets/images/app-image.png")}
-        style={styles.image}
-      />
+      <ActivityIndicator size="large" color="#4F46E5" />
+      <Text style={styles.text}>Loading HRMS...</Text>
     </View>
   );
 }
@@ -18,13 +36,13 @@ export default function Index() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0c0c0c",
-    alignItems: "center",
-    justifyContent: "center",
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  image: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "contain",
+  text: {
+    marginTop: 16,
+    fontSize: 16,
+    color: '#6B7280',
   },
 });
