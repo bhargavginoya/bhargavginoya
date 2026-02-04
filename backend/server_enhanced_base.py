@@ -454,3 +454,335 @@ async def get_today_status(current_user: dict = Depends(get_current_user)):
         "center_name": attendance.get("center_name")
     }
 
+# ============ ENHANCED LEAVE MANAGEMENT WITH RULE ENGINE ============
+
+@api_router.post("/leaves/apply")
+async def apply_leave(leave_req: LeaveRequest, current_user: dict = Depends(get_current_user)):
+    """Apply for leave with advanced validation"""
+    db = await get_database()
+    
+    # Validate using leave engine
+    is_valid, error_msg = await leave_engine.validate_leave_application(
+        user_id=current_user["id"],
+        leave_type=leave_req.leave_type,
+        start_date=leave_req.start_date,
+        end_date=leave_req.end_date,
+        days_count=leave_req.days_count,
+        medical_certificate=leave_req.medical_certificate_base64
+    )
+    
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+    
+    # Calculate days in advance
+    days_in_advance = leave_engine._calculate_days_in_advance(leave_req.start_date)
+    month_key = datetime.strptime(leave_req.start_date, "%Y-%m-%d").strftime("%Y-%m")
+    
+    # Save medical certificate if provided
+    medical_cert_url = None
+    if leave_req.medical_certificate_base64:
+        cert_path = f"/app/backend/uploads/certificates/{current_user['id']}_{datetime.utcnow().timestamp()}.pdf"
+        os.makedirs(os.path.dirname(cert_path), exist_ok=True)
+        try:
+            cert_data = base64.b64decode(leave_req.medical_certificate_base64.split(',')[-1])
+            with open(cert_path, 'wb') as f:
+                f.write(cert_data)
+            medical_cert_url = cert_path
+        except Exception as e:
+            logging.error(f"Error saving certificate: {e}")
+    
+    # Create leave request
+    leave_dict = leave_req.dict()
+    leave_dict["user_id"] = current_user["id"]
+    leave_dict["user_name"] = current_user["full_name"]
+    leave_dict["status"] = "pending"
+    leave_dict["applied_at"] = datetime.utcnow()
+    leave_dict["days_in_advance"] = days_in_advance
+    leave_dict["month_applied"] = month_key
+    leave_dict["medical_certificate_url"] = medical_cert_url
+    leave_dict["override_history"] = []
+    
+    result = await db.leaves.insert_one(leave_dict)
+    leave_dict["id"] = str(result.inserted_id)
+    del leave_dict["_id"]
+    
+    return {"message": "Leave application submitted successfully", "leave_id": str(result.inserted_id)}
+
+@api_router.get("/leaves/my-leaves")
+async def get_my_leaves(current_user: dict = Depends(get_current_user)):
+    db = await get_database()
+    leaves = await db.leaves.find(
+        {"user_id": current_user["id"]}
+    ).sort("applied_at", -1).to_list(100)
+    
+    result = []
+    for leave in leaves:
+        leave["id"] = str(leave["_id"])
+        del leave["_id"]
+        result.append(leave)
+    
+    return result
+
+@api_router.get("/leaves/balance")
+async def get_leave_balance(current_user: dict = Depends(get_current_user)):
+    db = await get_database()
+    balance = await db.leave_balances.find_one({"user_id": current_user["id"]})
+    if not balance:
+        return {
+            "sick_balance": 0,
+            "casual_balance": 0,
+            "earned_balance": 0,
+            "marriage_balance": 0,
+            "bereavement_balance": 0
+        }
+    
+    return {
+        "sick_balance": balance.get("sick_balance", 0),
+        "casual_balance": balance.get("casual_balance", 0),
+        "earned_balance": balance.get("earned_balance", 0),
+        "marriage_balance": balance.get("marriage_balance", 0),
+        "bereavement_balance": balance.get("bereavement_balance", 0)
+    }
+
+@api_router.get("/leaves/pending")
+async def get_pending_leaves(current_user: dict = Depends(get_current_user)):
+    """Get pending leaves for approval"""
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER, UserRole.REPORTING_MANAGER, UserRole.CENTER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    db = await get_database()
+    
+    # Center admins see only their center's leaves
+    if current_user["role"] == UserRole.CENTER_ADMIN:
+        # Get employees from their centers
+        centers = await db.centers.find({"center_admin_ids": current_user["id"]}).to_list(1000)
+        center_ids = [str(c["_id"]) for c in centers]
+        
+        employees = await db.users.find({
+            "assigned_centers": {"$in": center_ids}
+        }).to_list(1000)
+        employee_ids = [str(e["_id"]) for e in employees]
+        
+        leaves = await db.leaves.find({
+            "user_id": {"$in": employee_ids},
+            "status": "pending"
+        }).sort("applied_at", 1).to_list(100)
+    else:
+        leaves = await db.leaves.find(
+            {"status": "pending"}
+        ).sort("applied_at", 1).to_list(100)
+    
+    result = []
+    for leave in leaves:
+        leave["id"] = str(leave["_id"])
+        del leave["_id"]
+        result.append(leave)
+    
+    return result
+
+@api_router.post("/leaves/approve")
+async def approve_leave(approval: LeaveApproval, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER, UserRole.REPORTING_MANAGER, UserRole.CENTER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    db = await get_database()
+    leave = await db.leaves.find_one({"_id": ObjectId(approval.leave_id)})
+    if not leave:
+        raise HTTPException(status_code=404, detail="Leave not found")
+    
+    if leave["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Leave already processed")
+    
+    # Update leave status
+    await db.leaves.update_one(
+        {"_id": ObjectId(approval.leave_id)},
+        {
+            "$set": {
+                "status": approval.status,
+                "remarks": approval.remarks,
+                "approved_by": current_user["id"],
+                "approved_at": datetime.utcnow()
+            }
+        }
+    )
+    
+    # Update leave balance if approved
+    if approval.status == "approved" and leave["leave_type"] != "lwp":
+        balance_key = f"{leave['leave_type']}_balance"
+        await db.leave_balances.update_one(
+            {"user_id": leave["user_id"]},
+            {"$inc": {balance_key: -leave["days_count"]}}
+        )
+    
+    return {"message": f"Leave {approval.status}"}
+
+@api_router.post("/leaves/override")
+async def override_leave_type(override: LeaveOverride, current_user: dict = Depends(get_current_user)):
+    """Super Admin only - change leave type"""
+    if current_user["role"] != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can override leave types")
+    
+    success = await leave_engine.admin_override_leave_type(
+        leave_id=override.leave_id,
+        admin_id=current_user["id"],
+        new_leave_type=override.new_leave_type,
+        reason=override.reason
+    )
+    
+    if not success:
+        raise HTTPException(status_code=404, detail="Leave not found")
+    
+    return {"message": "Leave type overridden successfully"}
+
+# ============ PAYROLL ROUTES ============
+
+@api_router.post("/payroll/generate")
+async def generate_payroll(payroll_data: PayrollGenerate, current_user: dict = Depends(get_current_user)):
+    """Generate payroll for a month"""
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    records = await payroll_engine.bulk_generate_payroll(
+        month=payroll_data.month,
+        employee_ids=payroll_data.employee_ids
+    )
+    
+    return {"message": f"Payroll generated for {len(records)} employees", "count": len(records)}
+
+@api_router.get("/payroll/my-payroll")
+async def get_my_payroll(current_user: dict = Depends(get_current_user), limit: int = 12):
+    """Get employee's payroll history"""
+    db = await get_database()
+    records = await db.payroll_records.find(
+        {"employee_id": current_user["id"]}
+    ).sort("generated_at", -1).limit(limit).to_list(limit)
+    
+    result = []
+    for record in records:
+        record["id"] = str(record["_id"])
+        del record["_id"]
+        result.append(record)
+    
+    return result
+
+@api_router.post("/payroll/{payroll_id}/finalize")
+async def finalize_payroll_record(payroll_id: str, current_user: dict = Depends(get_current_user)):
+    """Finalize payroll (lock it)"""
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    success = await payroll_engine.finalize_payroll(payroll_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Payroll not found")
+    
+    return {"message": "Payroll finalized"}
+
+@api_router.post("/compensatory/credit")
+async def credit_compensatory_off(comp_data: CompensatoryCredit, current_user: dict = Depends(get_current_user)):
+    """Credit compensatory off to center admin"""
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    await payroll_engine.credit_compensatory_off(
+        employee_id=comp_data.employee_id,
+        days=comp_data.days_credited,
+        reason=comp_data.reason,
+        valid_for_year=comp_data.year_valid_for
+    )
+    
+    return {"message": "Compensatory off credited successfully"}
+
+# ============ ADMIN ROUTES ============
+
+@api_router.get("/admin/users")
+async def get_all_users(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER, UserRole.CENTER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    db = await get_database()
+    
+    # Center admin sees only their employees
+    if current_user["role"] == UserRole.CENTER_ADMIN:
+        centers = await db.centers.find({"center_admin_ids": current_user["id"]}).to_list(1000)
+        center_ids = [str(c["_id"]) for c in centers]
+        users = await db.users.find({
+            "assigned_centers": {"$in": center_ids}
+        }).to_list(1000)
+    else:
+        users = await db.users.find().to_list(1000)
+    
+    result = []
+    for user in users:
+        user["id"] = str(user["_id"])
+        del user["_id"]
+        del user["password"]
+        result.append(user)
+    
+    return result
+
+@api_router.get("/admin/attendance/all")
+async def get_all_attendance(current_user: dict = Depends(get_current_user), date: Optional[str] = None):
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER, UserRole.CENTER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    db = await get_database()
+    
+    query = {}
+    if date:
+        query["date"] = date
+    else:
+        query["date"] = datetime.utcnow().date().isoformat()
+    
+    # Center admin sees only their center's attendance
+    if current_user["role"] == UserRole.CENTER_ADMIN:
+        centers = await db.centers.find({"center_admin_ids": current_user["id"]}).to_list(1000)
+        center_ids = [str(c["_id"]) for c in centers]
+        query["center_id"] = {"$in": center_ids}
+    
+    attendance_records = await db.attendance.find(query).to_list(1000)
+    
+    result = []
+    for record in attendance_records:
+        record["id"] = str(record["_id"])
+        del record["_id"]
+        result.append(record)
+    
+    return result
+
+# Old geofences endpoint for backward compatibility
+@api_router.get("/geofences")
+async def get_geofences_legacy(current_user: dict = Depends(get_current_user)):
+    """Legacy endpoint - returns geofences from all centers"""
+    db = await get_database()
+    centers = await db.centers.find().to_list(1000)
+    
+    all_geofences = []
+    for center in centers:
+        for gf in center.get("geofences", []):
+            gf["id"] = str(gf.get("_id", str(uuid.uuid4())))
+            gf["center_id"] = str(center["_id"])
+            gf["center_name"] = center["name"]
+            if "created_at" not in gf or gf["created_at"] is None:
+                gf["created_at"] = center.get("created_at", datetime.utcnow())
+            all_geofences.append(gf)
+    
+    return all_geofences
+
+# Include router
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
