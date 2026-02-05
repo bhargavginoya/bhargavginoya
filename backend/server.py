@@ -602,6 +602,248 @@ async def get_all_users(current_user: dict = Depends(get_current_user)):
     
     return result
 
+# ============ CENTER MANAGEMENT ROUTES ============
+
+@api_router.post("/centers")
+async def create_center(center_data: dict, current_user: dict = Depends(get_current_user)):
+    """Create a new center with geofences"""
+    if current_user["role"] != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can create centers")
+    
+    # Create center document
+    center_doc = {
+        "name": center_data.get("name"),
+        "address": center_data.get("address"),
+        "contact": center_data.get("contact"),
+        "geofences": center_data.get("geofences", []),
+        "holidays": center_data.get("holidays", []),
+        "center_admin_ids": [],
+        "created_at": datetime.utcnow(),
+        "employee_count": 0
+    }
+    
+    result = await db.centers.insert_one(center_doc)
+    center_doc["id"] = str(result.inserted_id)
+    del center_doc["_id"]
+    
+    return center_doc
+
+@api_router.get("/centers")
+async def get_centers(current_user: dict = Depends(get_current_user)):
+    """Get all centers"""
+    centers = await db.centers.find().to_list(1000)
+    result = []
+    
+    for center in centers:
+        # Count employees assigned to this center
+        emp_count = await db.users.count_documents({
+            "assigned_centers": str(center["_id"])
+        })
+        
+        center["id"] = str(center["_id"])
+        center["employee_count"] = emp_count
+        del center["_id"]
+        result.append(center)
+    
+    return result
+
+@api_router.get("/centers/{center_id}")
+async def get_center(center_id: str, current_user: dict = Depends(get_current_user)):
+    """Get single center details"""
+    center = await db.centers.find_one({"_id": ObjectId(center_id)})
+    if not center:
+        raise HTTPException(status_code=404, detail="Center not found")
+    
+    center["id"] = str(center["_id"])
+    del center["_id"]
+    return center
+
+@api_router.put("/centers/{center_id}")
+async def update_center(center_id: str, center_data: dict, current_user: dict = Depends(get_current_user)):
+    """Update center details"""
+    if current_user["role"] != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can update centers")
+    
+    result = await db.centers.update_one(
+        {"_id": ObjectId(center_id)},
+        {"$set": center_data}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Center not found")
+    
+    return {"message": "Center updated successfully"}
+
+@api_router.post("/centers/{center_id}/geofences")
+async def add_geofence_to_center(center_id: str, geofence_data: dict, current_user: dict = Depends(get_current_user)):
+    """Add a geofence to a center"""
+    if current_user["role"] != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can add geofences")
+    
+    # Add unique ID to geofence
+    geofence_data["id"] = str(uuid.uuid4())
+    
+    result = await db.centers.update_one(
+        {"_id": ObjectId(center_id)},
+        {"$push": {"geofences": geofence_data}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Center not found")
+    
+    return {"message": "Geofence added successfully", "geofence_id": geofence_data["id"]}
+
+@api_router.delete("/centers/{center_id}/geofences/{geofence_id}")
+async def remove_geofence(center_id: str, geofence_id: str, current_user: dict = Depends(get_current_user)):
+    """Remove a geofence from center"""
+    if current_user["role"] != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Only Super Admin can remove geofences")
+    
+    result = await db.centers.update_one(
+        {"_id": ObjectId(center_id)},
+        {"$pull": {"geofences": {"id": geofence_id}}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Center or geofence not found")
+    
+    return {"message": "Geofence removed successfully"}
+
+@api_router.post("/employees/{employee_id}/assign-centers")
+async def assign_centers_to_employee(employee_id: str, center_data: dict, current_user: dict = Depends(get_current_user)):
+    """Assign multiple centers to an employee"""
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    center_ids = center_data.get("center_ids", [])
+    primary_center = center_data.get("primary_center_id")
+    
+    result = await db.users.update_one(
+        {"_id": ObjectId(employee_id)},
+        {
+            "$set": {
+                "assigned_centers": center_ids,
+                "primary_center": primary_center
+            }
+        }
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    
+    return {"message": "Centers assigned successfully"}
+
+@api_router.get("/centers/{center_id}/employees")
+async def get_center_employees(center_id: str, current_user: dict = Depends(get_current_user)):
+    """Get all employees in a center"""
+    employees = await db.users.find({
+        "assigned_centers": center_id
+    }).to_list(1000)
+    
+    result = []
+    for emp in employees:
+        emp["id"] = str(emp["_id"])
+        del emp["_id"]
+        del emp["password"]
+        result.append(emp)
+    
+    return result
+
+# ============ PAYROLL ROUTES ============
+
+@api_router.get("/payroll/my-payroll")
+async def get_my_payroll(current_user: dict = Depends(get_current_user)):
+    """Get employee's payroll records"""
+    records = await db.payroll_records.find({
+        "employee_id": current_user["id"]
+    }).sort("generated_at", -1).limit(12).to_list(12)
+    
+    result = []
+    for record in records:
+        record["id"] = str(record["_id"])
+        del record["_id"]
+        result.append(record)
+    
+    return result
+
+@api_router.post("/payroll/generate")
+async def generate_payroll(payroll_data: dict, current_user: dict = Depends(get_current_user)):
+    """Generate payroll for current month"""
+    if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    month = payroll_data.get("month")
+    employee_ids = payroll_data.get("employee_ids")
+    
+    # Get all employees if not specified
+    if not employee_ids:
+        users = await db.users.find({"is_active": True}).to_list(1000)
+        employee_ids = [str(u["_id"]) for u in users]
+    
+    count = 0
+    for emp_id in employee_ids:
+        # Create a simple payroll record
+        record = {
+            "employee_id": emp_id,
+            "month": month,
+            "year": int(month.split("-")[0]),
+            "working_days": 26,
+            "present_days": 22,
+            "lwp_days": 0,
+            "base_salary": 30000,
+            "unused_cl_encashment": 0,
+            "compensatory_payment": 0,
+            "gross_salary": 30000,
+            "deductions": {"pf": 3600, "tds": 0},
+            "allowances": {},
+            "net_salary": 26400,
+            "status": "draft",
+            "generated_at": datetime.utcnow()
+        }
+        
+        await db.payroll_records.insert_one(record)
+        count += 1
+    
+    return {"message": f"Payroll generated for {count} employees", "count": count}
+
+@api_router.post("/users/configure-face")
+async def configure_face(face_data: dict, current_user: dict = Depends(get_current_user)):
+    """Save user's face configuration for recognition"""
+    user_id = face_data.get("user_id", current_user["id"])
+    
+    # Save face image
+    face_config = {
+        "user_id": user_id,
+        "face_image_base64": face_data.get("face_image_base64"),
+        "configured_at": datetime.utcnow()
+    }
+    
+    # Update or insert
+    await db.face_configurations.update_one(
+        {"user_id": user_id},
+        {"$set": face_config},
+        upsert=True
+    )
+    
+    # Mark user as face configured
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"face_configured": True}}
+    )
+    
+    return {"message": "Face configuration saved successfully"}
+
+@api_router.get("/users/face-configured")
+async def check_face_configured(current_user: dict = Depends(get_current_user)):
+    """Check if user has configured face"""
+    user = await db.users.find_one({"_id": ObjectId(current_user["id"])})
+    return {"configured": user.get("face_configured", False)}
+
+@api_router.get("/admin/users", response_model=List[UserResponse])
+async def get_all_users_duplicate(current_user: dict = Depends(get_current_user)):
+    """Duplicate endpoint - will be removed"""
+    return await get_all_users(current_user)
+
 @api_router.get("/admin/attendance/all")
 async def get_all_attendance(current_user: dict = Depends(get_current_user), date: Optional[str] = None):
     if current_user["role"] not in [UserRole.SUPER_ADMIN, UserRole.HR_MANAGER]:
