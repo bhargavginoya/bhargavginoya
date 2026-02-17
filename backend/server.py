@@ -7,7 +7,7 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 import uuid
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
@@ -15,6 +15,7 @@ import jwt
 from bson import ObjectId
 import json
 import base64
+import hashlib
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -128,11 +129,12 @@ class CheckInRequest(BaseModel):
     latitude: float
     longitude: float
     selfie_base64: str
-    geofence_id: str
+    geofence_id: Optional[str] = None
 
 class CheckOutRequest(BaseModel):
     latitude: float
     longitude: float
+    selfie_base64: Optional[str] = None
 
 class AttendanceResponse(BaseModel):
     id: str
@@ -318,6 +320,102 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     
     return R * c
 
+
+def make_face_fingerprint(face_base64: str) -> str:
+    """Create deterministic fingerprint for face payload used as lightweight local fallback."""
+    normalized = face_base64.strip().encode("utf-8")
+    return hashlib.sha256(normalized).hexdigest()
+
+
+async def verify_face_for_user(user_id: str, selfie_base64: str) -> Tuple[bool, str]:
+    """
+    Validate employee face during attendance.
+    Current local mode compares face fingerprints; this can be replaced with Horilla/ML service.
+    """
+    face_config = await db.face_configurations.find_one({"user_id": user_id})
+    if not face_config:
+        return False, "Face is not configured. Please complete face enrollment first."
+
+    enrolled_fingerprint = face_config.get("face_fingerprint")
+    if not enrolled_fingerprint and face_config.get("face_image_base64"):
+        # Backward compatibility for old records without fingerprint.
+        enrolled_fingerprint = make_face_fingerprint(face_config.get("face_image_base64"))
+
+    if not enrolled_fingerprint:
+        return False, "Face enrollment record is invalid. Please reconfigure your face."
+
+    incoming_fingerprint = make_face_fingerprint(selfie_base64)
+    if incoming_fingerprint != enrolled_fingerprint:
+        return False, "Face verification failed. Captured face does not match enrollment."
+
+    return True, "Face verified"
+
+
+async def get_allowed_geofences_for_user(user: dict) -> List[dict]:
+    """Resolve geofences employee is allowed to punch in from across multiple centers."""
+    assigned_centers = user.get("assigned_centers", [])
+    allowed_geofence_ids = set(user.get("allowed_geofence_ids", []))
+
+    # Global geofences are always eligible, then narrowed by optional assignment.
+    global_geofences = await db.geofences.find().to_list(1000)
+
+    center_geofences: List[dict] = []
+    if assigned_centers:
+        centers = await db.centers.find({"_id": {"$in": [ObjectId(cid) for cid in assigned_centers if ObjectId.is_valid(cid)]}}).to_list(1000)
+        for center in centers:
+            for geofence in center.get("geofences", []):
+                merged = geofence.copy()
+                merged["center_id"] = str(center["_id"])
+                center_geofences.append(merged)
+
+    consolidated = []
+    for gf in global_geofences:
+        consolidated.append({
+            "id": str(gf.get("_id")),
+            "name": gf.get("name"),
+            "latitude": gf.get("latitude"),
+            "longitude": gf.get("longitude"),
+            "radius": gf.get("radius", 100),
+            "source": "global",
+        })
+
+    for gf in center_geofences:
+        consolidated.append({
+            "id": gf.get("id"),
+            "name": gf.get("name"),
+            "latitude": gf.get("latitude"),
+            "longitude": gf.get("longitude"),
+            "radius": gf.get("radius", 100),
+            "source": "center",
+            "center_id": gf.get("center_id"),
+        })
+
+    if allowed_geofence_ids:
+        consolidated = [gf for gf in consolidated if gf.get("id") in allowed_geofence_ids]
+
+    return consolidated
+
+
+def resolve_nearest_matching_geofence(latitude: float, longitude: float, geofences: List[dict]) -> Optional[Dict]:
+    """Return nearest in-bound geofence from allowed list."""
+    in_range = []
+    for geofence in geofences:
+        distance = calculate_distance(
+            latitude,
+            longitude,
+            geofence["latitude"],
+            geofence["longitude"],
+        )
+        if distance <= geofence.get("radius", 100):
+            geo = geofence.copy()
+            geo["distance"] = distance
+            in_range.append(geo)
+
+    if not in_range:
+        return None
+
+    return sorted(in_range, key=lambda item: item["distance"])[0]
+
 @api_router.post("/attendance/checkin", response_model=AttendanceResponse)
 async def check_in(checkin_data: CheckInRequest, current_user: dict = Depends(get_current_user)):
     # Check if already checked in today
@@ -330,23 +428,50 @@ async def check_in(checkin_data: CheckInRequest, current_user: dict = Depends(ge
     if existing:
         raise HTTPException(status_code=400, detail="Already checked in today")
     
-    # Validate geofence
-    geofence = await db.geofences.find_one({"_id": ObjectId(checkin_data.geofence_id)})
-    if not geofence:
-        raise HTTPException(status_code=404, detail="Geofence not found")
-    
-    # Check if within geofence radius
-    distance = calculate_distance(
-        checkin_data.latitude,
-        checkin_data.longitude,
-        geofence["latitude"],
-        geofence["longitude"]
-    )
-    
-    if distance > geofence["radius"]:
+    # Validate face before attendance punch.
+    is_face_valid, face_msg = await verify_face_for_user(current_user["id"], checkin_data.selfie_base64)
+    if not is_face_valid:
+        raise HTTPException(status_code=400, detail=face_msg)
+
+    # Resolve available geofences across multiple centers.
+    allowed_geofences = await get_allowed_geofences_for_user(current_user)
+    if not allowed_geofences:
+        raise HTTPException(status_code=400, detail="No geofence mapped to this employee")
+
+    selected_geofence = None
+    if checkin_data.geofence_id:
+        selected_geofence = next((gf for gf in allowed_geofences if gf.get("id") == checkin_data.geofence_id), None)
+        if not selected_geofence:
+            raise HTTPException(status_code=404, detail="Selected geofence not found in employee mapping")
+
+        distance = calculate_distance(
+            checkin_data.latitude,
+            checkin_data.longitude,
+            selected_geofence["latitude"],
+            selected_geofence["longitude"],
+        )
+        if distance > selected_geofence["radius"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Outside geofence boundary. You are {int(distance)}m away, allowed radius is {int(selected_geofence['radius'])}m"
+            )
+        selected_geofence["distance"] = distance
+    else:
+        selected_geofence = resolve_nearest_matching_geofence(
+            checkin_data.latitude,
+            checkin_data.longitude,
+            allowed_geofences,
+        )
+
+    if not selected_geofence:
+        nearest_distances = [
+            int(calculate_distance(checkin_data.latitude, checkin_data.longitude, gf["latitude"], gf["longitude"]))
+            for gf in allowed_geofences
+        ]
+        min_distance = min(nearest_distances) if nearest_distances else None
         raise HTTPException(
             status_code=400,
-            detail=f"Outside geofence boundary. You are {int(distance)}m away, allowed radius is {int(geofence['radius'])}m"
+            detail=f"Outside all assigned geofences. Nearest assigned fence is {min_distance}m away" if min_distance is not None else "Outside assigned geofence boundary"
         )
     
     # Create attendance record
@@ -357,11 +482,12 @@ async def check_in(checkin_data: CheckInRequest, current_user: dict = Depends(ge
         "check_in_location": {
             "latitude": checkin_data.latitude,
             "longitude": checkin_data.longitude,
-            "distance_from_center": distance
+            "distance_from_center": selected_geofence["distance"]
         },
         "selfie_base64": checkin_data.selfie_base64,
         "status": "present",
-        "geofence_id": checkin_data.geofence_id,
+        "geofence_id": selected_geofence["id"],
+        "geofence_name": selected_geofence.get("name"),
         "date": today
     }
     
@@ -393,7 +519,8 @@ async def check_out(checkout_data: CheckOutRequest, current_user: dict = Depends
                 "check_out_location": {
                     "latitude": checkout_data.latitude,
                     "longitude": checkout_data.longitude
-                }
+                },
+                "check_out_face_verified": bool(checkout_data.selfie_base64),
             }
         }
     )
@@ -413,6 +540,12 @@ async def get_my_attendance(current_user: dict = Depends(get_current_user), limi
         result.append(AttendanceResponse(**record))
     
     return result
+
+
+@api_router.get("/attendance/eligible-geofences")
+async def get_eligible_geofences(current_user: dict = Depends(get_current_user)):
+    geofences = await get_allowed_geofences_for_user(current_user)
+    return geofences
 
 @api_router.get("/attendance/today-status")
 async def get_today_status(current_user: dict = Depends(get_current_user)):
@@ -717,13 +850,15 @@ async def assign_centers_to_employee(employee_id: str, center_data: dict, curren
     
     center_ids = center_data.get("center_ids", [])
     primary_center = center_data.get("primary_center_id")
+    allowed_geofence_ids = center_data.get("allowed_geofence_ids", [])
     
     result = await db.users.update_one(
         {"_id": ObjectId(employee_id)},
         {
             "$set": {
                 "assigned_centers": center_ids,
-                "primary_center": primary_center
+                "primary_center": primary_center,
+                "allowed_geofence_ids": allowed_geofence_ids,
             }
         }
     )
@@ -815,6 +950,7 @@ async def configure_face(face_data: dict, current_user: dict = Depends(get_curre
     face_config = {
         "user_id": user_id,
         "face_image_base64": face_data.get("face_image_base64"),
+        "face_fingerprint": make_face_fingerprint(face_data.get("face_image_base64", "")),
         "configured_at": datetime.utcnow()
     }
     
@@ -886,3 +1022,7 @@ logger = logging.getLogger(__name__)
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+    if checkout_data.selfie_base64:
+        is_face_valid, face_msg = await verify_face_for_user(current_user["id"], checkout_data.selfie_base64)
+        if not is_face_valid:
+            raise HTTPException(status_code=400, detail=face_msg)
