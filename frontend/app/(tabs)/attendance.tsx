@@ -23,6 +23,7 @@ export default function AttendanceScreen() {
   const [loading, setLoading] = useState(false);
   const [showCamera, setShowCamera] = useState(false);
   const [geofences, setGeofences] = useState<any[]>([]);
+  const [selectedGeofenceId, setSelectedGeofenceId] = useState<string | null>(null);
   const [currentLocation, setCurrentLocation] = useState<any>(null);
   const [permission, requestPermission] = useCameraPermissions();
   const [history, setHistory] = useState<any[]>([]);
@@ -55,10 +56,13 @@ export default function AttendanceScreen() {
 
   const fetchGeofences = async () => {
     try {
-      const response = await axios.get(`${API_URL}/api/geofences`, {
+      const response = await axios.get(`${API_URL}/api/attendance/eligible-geofences`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setGeofences(response.data);
+      if (response.data.length > 0) {
+        setSelectedGeofenceId(response.data[0].id);
+      }
     } catch (error) {
       console.error('Error fetching geofences:', error);
     }
@@ -118,16 +122,13 @@ export default function AttendanceScreen() {
       setShowCamera(false);
       setLoading(true);
 
-      // Use the first geofence (in production, you'd select based on proximity)
-      const selectedGeofence = geofences[0];
-
       const response = await axios.post(
         `${API_URL}/api/attendance/checkin`,
         {
           latitude: currentLocation.latitude,
           longitude: currentLocation.longitude,
           selfie_base64: photo.base64,
-          geofence_id: selectedGeofence.id,
+          geofence_id: selectedGeofenceId,
         },
         {
           headers: { Authorization: `Bearer ${token}` },
@@ -286,6 +287,25 @@ export default function AttendanceScreen() {
           </View>
         )}
       </View>
+
+      {geofences.length > 0 && (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Assigned Geofences</Text>
+          {geofences.map((gf) => (
+            <TouchableOpacity
+              key={gf.id}
+              style={[
+                styles.geofenceItem,
+                selectedGeofenceId === gf.id && styles.geofenceItemSelected,
+              ]}
+              onPress={() => setSelectedGeofenceId(gf.id)}
+            >
+              <Text style={styles.geofenceName}>{gf.name}</Text>
+              <Text style={styles.geofenceMeta}>{Math.round(gf.radius)}m radius • {gf.source}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
 
       <View style={styles.historySection}>
         <Text style={styles.sectionTitle}>Recent Attendance</Text>
@@ -489,6 +509,27 @@ const styles = StyleSheet.create({
   },
   historySection: {
     padding: 16,
+  },
+  geofenceItem: {
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 8,
+  },
+  geofenceItemSelected: {
+    borderColor: '#4F46E5',
+    backgroundColor: '#EEF2FF',
+  },
+  geofenceName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#111827',
+  },
+  geofenceMeta: {
+    marginTop: 4,
+    color: '#6B7280',
+    fontSize: 12,
   },
   sectionTitle: {
     fontSize: 18,
